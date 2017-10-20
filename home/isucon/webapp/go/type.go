@@ -10,8 +10,6 @@ type Entry struct {
 	AuthorID    int
 	Keyword     string
 	Description string
-	UpdatedAt   time.Time
-	CreatedAt   time.Time
 
 	Html  string
 	Stars []*Star

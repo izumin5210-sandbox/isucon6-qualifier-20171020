@@ -17,8 +17,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Songmu/strrand"
+	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
@@ -34,6 +36,7 @@ var (
 	isutarEndpoint string
 	isupamEndpoint string
 
+	pool    *redis.Pool
 	baseUrl *url.URL
 	db      *sql.DB
 	re      *render.Render
@@ -70,8 +73,21 @@ func authenticate(w http.ResponseWriter, r *http.Request) error {
 }
 
 func initializeHandler(w http.ResponseWriter, r *http.Request) {
+	conn := pool.Get()
+	conn.Do("FLUSHALL")
+	conn.Close()
 	_, err := db.Exec(`DELETE FROM entry WHERE id > 7101`)
 	panicIf(err)
+
+	rows, err := db.Query(`SELECT keyword, description FROM entry ORDER BY updated_at`)
+	panicIf(err)
+	for rows.Next() {
+		e := &Entry{}
+		err := rows.Scan(&e.Keyword, &e.Description)
+		panicIf(err)
+		saveEntry(e)
+	}
+	rows.Close()
 
 	resp, err := http.Get(fmt.Sprintf("%s/initialize", isutarEndpoint))
 	panicIf(err)
@@ -93,30 +109,13 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	page, _ := strconv.Atoi(p)
 
-	rows, err := db.Query(fmt.Sprintf(
-		"SELECT * FROM entry ORDER BY updated_at DESC LIMIT %d OFFSET %d",
-		perPage, perPage*(page-1),
-	))
-	if err != nil && err != sql.ErrNoRows {
-		panicIf(err)
-	}
-	entries := make([]*Entry, 0, 10)
-	for rows.Next() {
-		e := Entry{}
-		err := rows.Scan(&e.ID, &e.AuthorID, &e.Keyword, &e.Description, &e.UpdatedAt, &e.CreatedAt)
-		panicIf(err)
+	entries := getEntries(perPage, perPage*(page-1))
+	for _, e := range entries {
 		e.Html = htmlify(w, r, e.Description)
 		e.Stars = loadStars(e.Keyword)
-		entries = append(entries, &e)
 	}
-	rows.Close()
 
-	var totalEntries int
-	row := db.QueryRow(`SELECT COUNT(*) FROM entry`)
-	err = row.Scan(&totalEntries)
-	if err != nil && err != sql.ErrNoRows {
-		panicIf(err)
-	}
+	totalEntries := getEntryCount()
 
 	lastPage := int(math.Ceil(float64(totalEntries) / float64(perPage)))
 	pages := make([]int, 0, 10)
@@ -156,20 +155,14 @@ func keywordPostHandler(w http.ResponseWriter, r *http.Request) {
 		badRequest(w)
 		return
 	}
-	userID := getContext(r, "user_id").(int)
+	// userID := getContext(r, "user_id").(int)
 	description := r.FormValue("description")
 
 	if isSpamContents(description) || isSpamContents(keyword) {
 		http.Error(w, "SPAM!", http.StatusBadRequest)
 		return
 	}
-	_, err := db.Exec(`
-		INSERT INTO entry (author_id, keyword, description, created_at, updated_at)
-		VALUES (?, ?, ?, NOW(), NOW())
-		ON DUPLICATE KEY UPDATE
-		author_id = ?, keyword = ?, description = ?, updated_at = NOW()
-	`, userID, keyword, description, userID, keyword, description)
-	panicIf(err)
+	saveEntry(&Entry{Keyword: keyword, Description: description})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -255,19 +248,19 @@ func keywordByKeywordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	keyword, err := url.QueryUnescape(mux.Vars(r)["keyword"])
-	row := db.QueryRow(`SELECT * FROM entry WHERE keyword = ?`, keyword)
-	e := Entry{}
-	err = row.Scan(&e.ID, &e.AuthorID, &e.Keyword, &e.Description, &e.UpdatedAt, &e.CreatedAt)
-	if err == sql.ErrNoRows {
+	panicIf(err)
+	e := getEntryByKeyword(keyword)
+	if e == nil {
 		notFound(w)
 		return
 	}
+
 	e.Html = htmlify(w, r, e.Description)
 	e.Stars = loadStars(e.Keyword)
 
 	re.HTML(w, http.StatusOK, "keyword", struct {
 		Context context.Context
-		Entry   Entry
+		Entry   *Entry
 	}{
 		r.Context(), e,
 	})
@@ -292,15 +285,12 @@ func keywordByKeywordDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		badRequest(w)
 		return
 	}
-	row := db.QueryRow(`SELECT * FROM entry WHERE keyword = ?`, keyword)
-	e := Entry{}
-	err := row.Scan(&e.ID, &e.AuthorID, &e.Keyword, &e.Description, &e.UpdatedAt, &e.CreatedAt)
-	if err == sql.ErrNoRows {
+	e := getEntryByKeyword(keyword)
+	if e == nil {
 		notFound(w)
 		return
 	}
-	_, err = db.Exec(`DELETE FROM entry WHERE keyword = ?`, keyword)
-	panicIf(err)
+	deleteEntry(e)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -308,24 +298,8 @@ func htmlify(w http.ResponseWriter, r *http.Request, content string) string {
 	if content == "" {
 		return ""
 	}
-	rows, err := db.Query(`
-		SELECT * FROM entry ORDER BY CHARACTER_LENGTH(keyword) DESC
-	`)
-	panicIf(err)
-	entries := make([]*Entry, 0, 500)
-	for rows.Next() {
-		e := Entry{}
-		err := rows.Scan(&e.ID, &e.AuthorID, &e.Keyword, &e.Description, &e.UpdatedAt, &e.CreatedAt)
-		panicIf(err)
-		entries = append(entries, &e)
-	}
-	rows.Close()
-
-	keywords := make([]string, 0, 500)
-	for _, entry := range entries {
-		keywords = append(keywords, regexp.QuoteMeta(entry.Keyword))
-	}
-	re := regexp.MustCompile("("+strings.Join(keywords, "|")+")")
+	keywords := getKeywordsOrderByLength()
+	re := regexp.MustCompile("(" + strings.Join(keywords, "|") + ")")
 	kw2sha := make(map[string]string)
 	content = re.ReplaceAllStringFunc(content, func(kw string) string {
 		kw2sha[kw] = "isuda_" + fmt.Sprintf("%x", sha1.Sum([]byte(kw)))
@@ -333,7 +307,7 @@ func htmlify(w http.ResponseWriter, r *http.Request, content string) string {
 	})
 	content = html.EscapeString(content)
 	for kw, hash := range kw2sha {
-		u, err := r.URL.Parse(baseUrl.String()+"/keyword/" + pathURIEscape(kw))
+		u, err := r.URL.Parse(baseUrl.String() + "/keyword/" + pathURIEscape(kw))
 		panicIf(err)
 		link := fmt.Sprintf("<a href=\"%s\">%s</a>", u, html.EscapeString(kw))
 		content = strings.Replace(content, hash, link, -1)
@@ -421,6 +395,14 @@ func main() {
 	}
 	db.Exec("SET SESSION sql_mode='TRADITIONAL,NO_AUTO_VALUE_ON_ZERO,ONLY_FULL_GROUP_BY'")
 	db.Exec("SET NAMES utf8mb4")
+
+	pool = &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 10 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", ":6379")
+		},
+	}
 
 	isutarEndpoint = os.Getenv("ISUTAR_ORIGIN")
 	if isutarEndpoint == "" {
