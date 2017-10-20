@@ -9,7 +9,7 @@ deps:
 	go get github.com/garyburd/redigo/redis
 
 isuda: deps
-	go build -o isuda isuda.go type.go util.go
+	go build -o isuda entry.go isuda.go type.go util.go
 
 isutar: deps
 	go build -o isutar isutar.go type.go util.go
