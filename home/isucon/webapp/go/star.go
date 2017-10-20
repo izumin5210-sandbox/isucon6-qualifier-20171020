@@ -19,7 +19,7 @@ func saveStar(s *Star) {
 func getStarsByKeyword(k string) []*Star {
 	conn := pool.Get()
 	defer conn.Close()
-	usernames, err := redis.Strings(conn.Do("LRANGE", starKey(k)))
+	usernames, err := redis.Strings(conn.Do("LRANGE", starKey(k), 0, -1))
 	panicIf(err)
 	stars := make([]*Star, 0, len(usernames))
 	for _, username := range usernames {
