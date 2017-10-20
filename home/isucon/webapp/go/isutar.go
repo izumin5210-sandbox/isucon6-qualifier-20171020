@@ -31,7 +31,7 @@ func initializeHandler(w http.ResponseWriter, r *http.Request) {
 
 func starsHandler(w http.ResponseWriter, r *http.Request) {
 	keyword := r.FormValue("keyword")
-	re.JSON(w, http.StatusOK, map[string][]Star{
+	re.JSON(w, http.StatusOK, map[string][]*Star{
 		"result": getStarsByKeyword(keyword),
 	})
 }
