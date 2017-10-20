@@ -73,6 +73,9 @@ func authenticate(w http.ResponseWriter, r *http.Request) error {
 }
 
 func initializeHandler(w http.ResponseWriter, r *http.Request) {
+	conn := pool.Get()
+	conn.Do("FLUSHALL")
+	conn.Close()
 	_, err := db.Exec(`DELETE FROM entry WHERE id > 7101`)
 	panicIf(err)
 
