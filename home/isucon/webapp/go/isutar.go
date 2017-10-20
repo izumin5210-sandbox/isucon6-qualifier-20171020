@@ -8,13 +8,16 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
+	"github.com/garyburd/redigo/redis"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"github.com/unrolled/render"
 )
 
 var (
+	pool    *redis.Pool
 	baseUrl *url.URL
 	db      *sql.DB
 	re      *render.Render
@@ -28,23 +31,8 @@ func initializeHandler(w http.ResponseWriter, r *http.Request) {
 
 func starsHandler(w http.ResponseWriter, r *http.Request) {
 	keyword := r.FormValue("keyword")
-	rows, err := db.Query(`SELECT * FROM star WHERE keyword = ?`, keyword)
-	if err != nil && err != sql.ErrNoRows {
-		panicIf(err)
-		return
-	}
-
-	stars := make([]Star, 0, 10)
-	for rows.Next() {
-		s := Star{}
-		err := rows.Scan(&s.ID, &s.Keyword, &s.UserName, &s.CreatedAt)
-		panicIf(err)
-		stars = append(stars, s)
-	}
-	rows.Close()
-
-	re.JSON(w, http.StatusOK, map[string][]Star{
-		"result": stars,
+	re.JSON(w, http.StatusOK, map[string][]*Star{
+		"result": getStarsByKeyword(keyword),
 	})
 }
 
@@ -66,8 +54,7 @@ func starsPostHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := r.FormValue("user")
-	_, err = db.Exec(`INSERT INTO star (keyword, user_name, created_at) VALUES (?, ?, NOW())`, keyword, user)
-	panicIf(err)
+	saveStar(&Star{Keyword: keyword, UserName: user})
 
 	re.JSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }
@@ -104,6 +91,14 @@ func main() {
 	}
 	db.Exec("SET SESSION sql_mode='TRADITIONAL,NO_AUTO_VALUE_ON_ZERO,ONLY_FULL_GROUP_BY'")
 	db.Exec("SET NAMES utf8mb4")
+
+	pool = &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 10 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", ":6379")
+		},
+	}
 
 	re = render.New(render.Options{Directory: "dummy"})
 

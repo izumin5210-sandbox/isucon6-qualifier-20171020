@@ -112,7 +112,7 @@ func topHandler(w http.ResponseWriter, r *http.Request) {
 	entries := getEntries(perPage, perPage*(page-1))
 	for _, e := range entries {
 		e.Html = htmlify(w, r, e.Description)
-		e.Stars = loadStars(e.Keyword)
+		e.Stars = getStarsByKeyword(e.Keyword)
 	}
 
 	totalEntries := getEntryCount()
@@ -256,7 +256,7 @@ func keywordByKeywordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	e.Html = htmlify(w, r, e.Description)
-	e.Stars = loadStars(e.Keyword)
+	e.Stars = getStarsByKeyword(e.Keyword)
 
 	re.HTML(w, http.StatusOK, "keyword", struct {
 		Context context.Context
@@ -313,21 +313,6 @@ func htmlify(w http.ResponseWriter, r *http.Request, content string) string {
 		content = strings.Replace(content, hash, link, -1)
 	}
 	return strings.Replace(content, "\n", "<br />\n", -1)
-}
-
-func loadStars(keyword string) []*Star {
-	v := url.Values{}
-	v.Set("keyword", keyword)
-	resp, err := http.Get(fmt.Sprintf("%s/stars", isutarEndpoint) + "?" + v.Encode())
-	panicIf(err)
-	defer resp.Body.Close()
-
-	var data struct {
-		Result []*Star `json:result`
-	}
-	err = json.NewDecoder(resp.Body).Decode(&data)
-	panicIf(err)
-	return data.Result
 }
 
 func isSpamContents(content string) bool {
